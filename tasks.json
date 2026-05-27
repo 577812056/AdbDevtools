@@ -1,0 +1,54 @@
+[
+  {
+    "task_id": "fe106e69-8ff0-4706-ba7f-d32288f2c103",
+    "name": "\u70b9\u51fb\u6a21\u62df\u5668\u5de6\u4e0b\u89d2\u6309\u94ae",
+    "action": "tap",
+    "serial": "emulator-5554",
+    "target_scope": "single",
+    "params": {
+      "x": 37,
+      "y": 1399
+    },
+    "steps": [
+      {
+        "action": "tap",
+        "params": {
+          "x": 37,
+          "y": 1399
+        }
+      }
+    ],
+    "schedule_type": "scheduled",
+    "schedule_time": "2026-05-27T04:10:00",
+    "interval_seconds": 60,
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0
+  },
+  {
+    "task_id": "20e658ef-e398-4946-a34e-6f1b034f8de1",
+    "name": "1",
+    "action": "tap",
+    "serial": "emulator-5554",
+    "target_scope": "single",
+    "params": {
+      "x": 38,
+      "y": 1402
+    },
+    "steps": [
+      {
+        "action": "tap",
+        "params": {
+          "x": 38,
+          "y": 1402
+        }
+      }
+    ],
+    "schedule_type": "interval",
+    "schedule_time": null,
+    "interval_seconds": 60,
+    "enabled": false,
+    "last_run": null,
+    "run_count": 0
+  }
+]
