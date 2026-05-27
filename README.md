@@ -15,6 +15,10 @@
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
 </p>
 
+<p align="center">
+  <img src="adbtools.png" width="100%" alt="ADB Devtools 界面预览">
+</p>
+
 ---
 
 ## 功能特性
