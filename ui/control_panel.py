@@ -565,6 +565,31 @@ class ControlPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.steps_list.addItem(item)
 
+    def _get_step_app_options(self):
+        options = []
+        seen = set()
+        if hasattr(self, "app_list"):
+            for index in range(self.app_list.count()):
+                item = self.app_list.item(index)
+                package = item.data(Qt.ItemDataRole.UserRole)
+                if package and package not in seen:
+                    seen.add(package)
+                    options.append((item.text(), package))
+
+        if options:
+            return options
+
+        target_scope, target_serial = self.task_device_combo.currentData()
+        serial = target_serial if target_scope == "single" else self.current_serial
+        if not serial:
+            return []
+
+        for package in self.adb_manager.list_packages(serial, third_party_only=True):
+            if package not in seen:
+                seen.add(package)
+                options.append((package, package))
+        return options
+
     def _default_tap_step(self):
         return {"action": DEFAULT_TAP_STEP["action"], "params": dict(DEFAULT_TAP_STEP["params"])}
 
@@ -608,7 +633,7 @@ class ControlPanel(QWidget):
 
     def add_step(self):
         default_step = self._default_tap_step()
-        dialog = StepEditDialog(default_step, len(self.task_steps), self)
+        dialog = StepEditDialog(default_step, len(self.task_steps), self, self._get_step_app_options())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.task_steps.append(default_step)
             self.refresh_step_list()
@@ -619,7 +644,7 @@ class ControlPanel(QWidget):
             return
         idx = item.data(Qt.ItemDataRole.UserRole)
         step = self.task_steps[idx]
-        dialog = StepEditDialog(step, idx, self)
+        dialog = StepEditDialog(step, idx, self, self._get_step_app_options())
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.task_steps[idx] = step
             self.refresh_step_list()

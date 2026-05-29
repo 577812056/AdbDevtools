@@ -181,6 +181,24 @@ class TaskEditDialog(QDialog):
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.steps_list.addItem(item)
 
+    def _get_step_app_options(self):
+        parent = self.parent()
+        adb_manager = getattr(parent, "adb_manager", None)
+        if not adb_manager:
+            return []
+
+        target_scope, target_serial = self.device_combo.currentData()
+        serial = target_serial
+        if target_scope == "all":
+            serial = getattr(parent, "current_serial", None)
+        if not serial:
+            return []
+
+        options = []
+        for package in adb_manager.list_packages(serial, third_party_only=True):
+            options.append((package, package))
+        return options
+
     def _default_tap_step(self):
         return {"action": DEFAULT_TAP_STEP["action"], "params": dict(DEFAULT_TAP_STEP["params"])}
 
@@ -273,7 +291,7 @@ class TaskEditDialog(QDialog):
 
     def add_step(self):
         default = self._default_tap_step()
-        d = StepEditDialog(default, len(self.steps), self)
+        d = StepEditDialog(default, len(self.steps), self, self._get_step_app_options())
         if d.exec() == QDialog.DialogCode.Accepted:
             self.steps.append(default)
             self.refresh_steps()
@@ -284,7 +302,7 @@ class TaskEditDialog(QDialog):
             return
         idx = item.data(Qt.ItemDataRole.UserRole)
         step = self.steps[idx]
-        d = StepEditDialog(step, idx, self)
+        d = StepEditDialog(step, idx, self, self._get_step_app_options())
         if d.exec() == QDialog.DialogCode.Accepted:
             self.steps[idx] = step
             self.refresh_steps()

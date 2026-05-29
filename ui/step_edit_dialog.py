@@ -1,14 +1,16 @@
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QComboBox,
-                             QSpinBox, QLineEdit, QWidget, QDialogButtonBox)
+from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
+                             QComboBox, QSpinBox, QLineEdit, QWidget,
+                             QDialogButtonBox)
 from PyQt6.QtCore import Qt
 from tasks.task_manager import TaskAction, KEY_MAP, KEY_MAP_REVERSE
 
 
 class StepEditDialog(QDialog):
-    def __init__(self, step: dict, step_index: int, parent=None):
+    def __init__(self, step: dict, step_index: int, parent=None, app_options=None):
         super().__init__(parent)
         self.step = step
         self.step_index = step_index
+        self.app_options = app_options or []
         self.setWindowTitle(f"编辑步骤 #{step_index + 1}")
         self.setMinimumWidth(380)
         self.params_widgets = {}
@@ -134,9 +136,24 @@ class StepEditDialog(QDialog):
             self.params_widgets = {"output_path": path}
 
         elif action in (TaskAction.START_APP, TaskAction.STOP_APP):
-            pkg = QLineEdit(params.get("package", ""))
-            self.params_form.addRow("包名:", pkg)
-            self.params_widgets = {"package": pkg}
+            current_package = params.get("package", "")
+            package_layout = QHBoxLayout()
+            package_combo = QComboBox()
+            package_combo.setEditable(True)
+            package_combo.addItem("-- 选择应用或输入包名 --", "")
+            for display, package in self.app_options:
+                package_combo.addItem(display, package)
+            if current_package:
+                index = package_combo.findData(current_package)
+                if index >= 0:
+                    package_combo.setCurrentIndex(index)
+                else:
+                    package_combo.setEditText(current_package)
+            package_layout.addWidget(package_combo)
+            package_widget = QWidget()
+            package_widget.setLayout(package_layout)
+            self.params_form.addRow("包名:", package_widget)
+            self.params_widgets = {"package": package_combo}
 
     def _collect_params(self) -> dict:
         action = self.action_combo.currentData()
@@ -159,7 +176,8 @@ class StepEditDialog(QDialog):
         elif action == TaskAction.SCREENSHOT:
             return {"output_path": w["output_path"].text()}
         elif action in (TaskAction.START_APP, TaskAction.STOP_APP):
-            return {"package": w["package"].text()}
+            package = w["package"].currentData() or w["package"].currentText().strip()
+            return {"package": package}
         return {}
 
     def on_accept(self):
