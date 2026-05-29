@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTabWidget,
                              QLineEdit, QCheckBox, QFileDialog, QMessageBox,
                              QFormLayout, QListWidget, QListWidgetItem, QComboBox,
                              QTimeEdit, QDialog, QProgressBar, QGraphicsView,
-                             QGraphicsScene, QGraphicsPixmapItem)
+                             QGraphicsScene, QGraphicsPixmapItem, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QTime, pyqtSignal, QThread, QRectF
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor
 from core.adb_manager import AdbManager
@@ -11,6 +11,7 @@ from tasks.task_manager import TaskManager, ScheduledTask, TaskAction, action_na
 from ui.task_edit_dialog import TaskEditDialog
 from ui.step_edit_dialog import StepEditDialog
 from ui.coordinate_picker import CoordinatePickerDialog
+from ui.image_sample_picker import ImageSamplePickerDialog
 from datetime import datetime
 import uuid
 import os
@@ -19,14 +20,25 @@ import time
 from PIL import Image
 
 
+DEFAULT_TAP_STEP = {"action": TaskAction.TAP, "params": {"x": 37, "y": 1399}}
+INTERVAL_UNITS = [
+    ("时", 60 * 60 * 1000),
+    ("分", 60 * 1000),
+    ("秒", 1000),
+    ("毫秒", 1),
+]
+
+
 class AppRefreshWorker(QThread):
     apps_loaded = pyqtSignal(str, list, int, int, int)
+    app_resolved = pyqtSignal(str, str, str)
     load_failed = pyqtSignal(str, str)
 
     def __init__(self, adb_manager: AdbManager, serial: str):
         super().__init__()
         self.adb_manager = adb_manager
         self.serial = serial
+        self.max_precise_resolve = 80
 
     def run(self):
         try:
@@ -38,27 +50,28 @@ class AppRefreshWorker(QThread):
             named = 0
             precise_named = 0
             items = []
+            needs_precise = []
 
             for package in packages:
                 label = names.get(package, "")
                 if len(label) < 2 or label.startswith("<"):
                     label = ""
-                if package in third_party_packages and (
-                    not label or self._looks_like_fallback_label(label, package)
-                ):
-                    precise_label = self.adb_manager.get_app_name(self.serial, package)
-                    if precise_label and not self._looks_like_fallback_label(precise_label, package):
-                        label = precise_label
-                        precise_named += 1
                 if label and self._looks_like_fallback_label(label, package):
                     label = ""
                 if label:
                     named += 1
+                elif package in third_party_packages:
+                    needs_precise.append(package)
 
                 display = f"{label} {package}" if label else package
                 items.append((display, package))
 
             self.apps_loaded.emit(self.serial, items, len(packages), named, precise_named)
+
+            for package in needs_precise[:self.max_precise_resolve]:
+                precise_label = self.adb_manager.get_app_name(self.serial, package)
+                if precise_label and not self._looks_like_fallback_label(precise_label, package):
+                    self.app_resolved.emit(self.serial, package, precise_label)
         except Exception as exc:
             self.load_failed.emit(self.serial, str(exc))
 
@@ -124,6 +137,7 @@ class ControlPanel(QWidget):
         self.task_manager = task_manager
         self.current_serial = None
         self.app_refresh_worker = None
+        self.app_resolved_count = 0
         self.recording_worker = None
         self.recording_steps = []
         self.recording_serial = None
@@ -392,6 +406,29 @@ class ControlPanel(QWidget):
         task_device_layout.addWidget(refresh_task_devices_btn)
         add_task_layout.addRow("执行设备:", task_device_layout)
 
+        self.task_mode_combo = QComboBox()
+        self.task_mode_combo.addItem("普通步骤任务", "normal")
+        self.task_mode_combo.addItem("图像匹配触发任务", "image_match")
+        self.task_mode_combo.currentIndexChanged.connect(self.on_task_mode_changed)
+        add_task_layout.addRow("任务模式:", self.task_mode_combo)
+
+        self.image_match_widget = QWidget()
+        image_match_layout = QHBoxLayout(self.image_match_widget)
+        image_match_layout.setContentsMargins(0, 0, 0, 0)
+        self.sample_status_label = QLabel("未选择样本图")
+        image_match_layout.addWidget(self.sample_status_label, 1)
+        pick_sample_btn = QPushButton("实时截图框选样本")
+        pick_sample_btn.clicked.connect(self.pick_image_sample)
+        image_match_layout.addWidget(pick_sample_btn)
+        add_task_layout.addRow("目标样本:", self.image_match_widget)
+
+        self.match_threshold = QDoubleSpinBox()
+        self.match_threshold.setRange(0.50, 0.99)
+        self.match_threshold.setSingleStep(0.01)
+        self.match_threshold.setValue(0.88)
+        self.match_threshold.setDecimals(2)
+        add_task_layout.addRow("匹配阈值:", self.match_threshold)
+
         self.steps_list = QListWidget()
         self.steps_list.setMaximumHeight(120)
         add_task_layout.addRow("操作步骤:", self.steps_list)
@@ -430,10 +467,14 @@ class ControlPanel(QWidget):
         self.interval_widget = QWidget()
         interval_layout = QHBoxLayout(self.interval_widget)
         self.interval_seconds = QSpinBox()
-        self.interval_seconds.setRange(1, 86400)
-        self.interval_seconds.setValue(60)
-        self.interval_seconds.setSuffix(" 秒")
+        self.interval_seconds.setRange(1, 999999)
+        self.interval_seconds.setValue(1)
         interval_layout.addWidget(self.interval_seconds)
+        self.interval_unit_combo = QComboBox()
+        for label, multiplier in INTERVAL_UNITS:
+            self.interval_unit_combo.addItem(label, multiplier)
+        self.interval_unit_combo.setCurrentText("分")
+        interval_layout.addWidget(self.interval_unit_combo)
         add_task_layout.addRow("间隔时间:", self.interval_widget)
 
         self.scheduled_time_widget = QWidget()
@@ -445,6 +486,7 @@ class ControlPanel(QWidget):
         add_task_layout.addRow("执行时间:", self.scheduled_time_widget)
 
         self.on_schedule_type_changed(0)
+        self.on_task_mode_changed()
 
         add_task_btn = QPushButton("添加任务")
         add_task_btn.clicked.connect(self.add_task)
@@ -487,8 +529,10 @@ class ControlPanel(QWidget):
         layout.addWidget(task_list_group)
 
         self.task_manager.task_executed.connect(self.on_task_executed)
+        self.task_manager.task_log.connect(self.on_task_log)
         self.refresh_task_list()
-        self.task_steps = [{"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}]
+        self.task_steps = [self._default_tap_step()]
+        self.match_config = {}
         self.refresh_step_list()
 
         return widget
@@ -521,8 +565,49 @@ class ControlPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.steps_list.addItem(item)
 
+    def _default_tap_step(self):
+        return {"action": DEFAULT_TAP_STEP["action"], "params": dict(DEFAULT_TAP_STEP["params"])}
+
+    def _interval_milliseconds_from_inputs(self):
+        return self.interval_seconds.value() * self.interval_unit_combo.currentData()
+
+    def _format_interval(self, milliseconds: int):
+        milliseconds = int(milliseconds or 0)
+        for label, multiplier in INTERVAL_UNITS:
+            if milliseconds >= multiplier and milliseconds % multiplier == 0:
+                return f"{milliseconds // multiplier}{label}"
+        return f"{milliseconds}毫秒"
+
+    def on_task_mode_changed(self):
+        is_image_match = self.task_mode_combo.currentData() == "image_match"
+        self.image_match_widget.setVisible(is_image_match)
+        self.match_threshold.setVisible(is_image_match)
+
+    def pick_image_sample(self):
+        target_scope, target_serial = self.task_device_combo.currentData()
+        serial = target_serial
+        if target_scope == "all":
+            serial = self.current_serial
+        if not serial:
+            self._log("选择目标样本", "失败 - 请先选择一个在线设备")
+            return
+
+        dialog = ImageSamplePickerDialog(self.adb_manager, serial, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.match_config = {
+                "sample_path": dialog.sample_path,
+                "region": {
+                    "x": round(dialog.region.x()),
+                    "y": round(dialog.region.y()),
+                    "width": round(dialog.region.width()),
+                    "height": round(dialog.region.height()),
+                },
+            }
+            self.sample_status_label.setText(os.path.basename(dialog.sample_path))
+            self._log("选择目标样本", f"已保存 - {dialog.sample_path}")
+
     def add_step(self):
-        default_step = {"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}
+        default_step = self._default_tap_step()
         dialog = StepEditDialog(default_step, len(self.task_steps), self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.task_steps.append(default_step)
@@ -547,7 +632,7 @@ class ControlPanel(QWidget):
         if len(self.task_steps) > 1:
             self.task_steps.pop(idx)
         else:
-            self.task_steps = [{"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}]
+            self.task_steps = [self._default_tap_step()]
         self.refresh_step_list()
 
     def move_step_up(self):
@@ -756,6 +841,7 @@ class ControlPanel(QWidget):
             return
 
         self.app_list.clear()
+        self.app_resolved_count = 0
         loading_item = QListWidgetItem("正在加载应用列表...")
         loading_item.setForeground(Qt.GlobalColor.gray)
         self.app_list.addItem(loading_item)
@@ -764,6 +850,7 @@ class ControlPanel(QWidget):
 
         self.app_refresh_worker = AppRefreshWorker(self.adb_manager, self.current_serial)
         self.app_refresh_worker.apps_loaded.connect(self.on_apps_loaded)
+        self.app_refresh_worker.app_resolved.connect(self.on_app_resolved)
         self.app_refresh_worker.load_failed.connect(self.on_apps_load_failed)
         self.app_refresh_worker.finished.connect(self.on_apps_refresh_finished)
         self.app_refresh_worker.start()
@@ -787,7 +874,21 @@ class ControlPanel(QWidget):
             item = QListWidgetItem(display)
             item.setData(Qt.ItemDataRole.UserRole, package)
             self.app_list.addItem(item)
-        self._log("刷新应用列表", f"完成: {package_count} 个应用, {named} 个已识别名称, {precise_named} 个精确解析")
+        self._log("刷新应用列表", f"完成: {package_count} 个应用, {named} 个已识别名称，快速模式")
+
+    def on_app_resolved(self, serial: str, package: str, label: str):
+        if serial != self.current_serial:
+            return
+
+        display = f"{label} {package}"
+        for index in range(self.app_list.count()):
+            item = self.app_list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == package:
+                item.setText(display)
+                self.app_resolved_count += 1
+                if self.app_resolved_count == 1 or self.app_resolved_count % 10 == 0:
+                    self._log("刷新应用列表", f"已补充非系统应用中文名: {self.app_resolved_count} 个")
+                return
 
     def on_apps_load_failed(self, serial: str, error: str):
         if serial != self.current_serial:
@@ -962,6 +1063,7 @@ class ControlPanel(QWidget):
             steps=[{"action": step["action"], "params": dict(step["params"])} for step in self.recording_steps],
             schedule_type="interval",
             interval_seconds=60,
+            interval_milliseconds=60000,
             enabled=False
         )
         self.task_manager.add_task(task)
@@ -1040,6 +1142,15 @@ class ControlPanel(QWidget):
         action = self.task_steps[0]["action"]
         params = self.task_steps[0]["params"]
         schedule_type = self.schedule_type.currentData()
+        task_mode = self.task_mode_combo.currentData()
+
+        match_config = {}
+        if task_mode == "image_match":
+            if not self.match_config.get("sample_path"):
+                self._log("添加图像匹配任务", "失败 - 请先实时截图并框选样本图")
+                return
+            match_config = dict(self.match_config)
+            match_config["threshold"] = self.match_threshold.value()
 
         schedule_time = None
         if schedule_type == "scheduled":
@@ -1060,9 +1171,12 @@ class ControlPanel(QWidget):
             target_scope=target_scope,
             params=params,
             steps=self.task_steps[:],
+            task_mode=task_mode,
+            match_config=match_config,
             schedule_type=schedule_type,
             schedule_time=schedule_time,
-            interval_seconds=self.interval_seconds.value()
+            interval_seconds=max(1, round(self._interval_milliseconds_from_inputs() / 1000)),
+            interval_milliseconds=self._interval_milliseconds_from_inputs(),
         )
 
         self.task_manager.add_task(task)
@@ -1070,7 +1184,10 @@ class ControlPanel(QWidget):
         self._log(f"添加任务: {name} ({len(self.task_steps)}步)", "成功")
 
         self.task_name.clear()
-        self.task_steps = [{"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}]
+        self.task_steps = [self._default_tap_step()]
+        self.task_mode_combo.setCurrentIndex(0)
+        self.match_config = {}
+        self.sample_status_label.setText("未选择样本图")
         self.refresh_step_list()
         
     def refresh_task_list(self):
@@ -1080,7 +1197,8 @@ class ControlPanel(QWidget):
         for task in tasks:
             status = "✓" if task.enabled else "✗"
             step_count = len(task.steps)
-            item_text = f"{status} {task.name} [{action_names.get(task.action, task.action)}] ({step_count}步)"
+            mode_name = "图像匹配" if getattr(task, "task_mode", "normal") == "image_match" else action_names.get(task.action, task.action)
+            item_text = f"{status} {task.name} [{mode_name}] ({step_count}步)"
             target_text = "所有设备" if task.target_scope == "all" or task.serial == "__all__" else task.serial
             item_text += f" - 设备: {target_text}"
             
@@ -1092,7 +1210,7 @@ class ControlPanel(QWidget):
                 except:
                     pass
             elif task.schedule_type == "interval":
-                item_text += f" - 间隔: {task.interval_seconds}秒"
+                item_text += f" - 间隔: {self._format_interval(task.interval_milliseconds)}"
                 
             if task.last_run:
                 item_text += f" - 最后运行: {task.last_run}"
@@ -1153,9 +1271,12 @@ class ControlPanel(QWidget):
             target_scope=getattr(task, "target_scope", "single"),
             params=dict(task.params),
             steps=[{"action": step["action"], "params": dict(step["params"])} for step in task.steps],
+            task_mode=getattr(task, "task_mode", "normal"),
+            match_config=dict(getattr(task, "match_config", {}) or {}),
             schedule_type=task.schedule_type,
             schedule_time=task.schedule_time,
             interval_seconds=task.interval_seconds,
+            interval_milliseconds=getattr(task, "interval_milliseconds", task.interval_seconds * 1000),
             enabled=False
         )
 
@@ -1198,4 +1319,10 @@ class ControlPanel(QWidget):
             detail += f" - 成功设备: {len(success_serials)}, 失败设备: {len(failed_serials)}"
             if failed_serials:
                 detail += f" ({', '.join(failed_serials)})"
+        task = self.task_manager.get_task(task_id)
+        if task and getattr(task, "task_mode", "normal") == "image_match" and success and success_serials and not failed_serials:
+            detail = f"扫描完成 - 已检查设备: {len(success_serials)}"
         self._log(f"定时任务: {task_name}", detail)
+
+    def on_task_log(self, task_name: str, message: str):
+        self._log(f"定时任务: {task_name}", message)

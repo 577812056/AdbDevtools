@@ -1,11 +1,23 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
                              QComboBox, QSpinBox, QTimeEdit, QWidget,
                              QDialogButtonBox, QMessageBox, QListWidget,
-                             QListWidgetItem, QHBoxLayout, QPushButton)
+                             QListWidgetItem, QHBoxLayout, QPushButton,
+                             QLabel, QDoubleSpinBox)
 from PyQt6.QtCore import Qt, QTime
 from tasks.task_manager import ScheduledTask, TaskAction, action_names, KEY_MAP, KEY_MAP_REVERSE
 from ui.step_edit_dialog import StepEditDialog
+from ui.image_sample_picker import ImageSamplePickerDialog
 from datetime import datetime
+import os
+
+
+DEFAULT_TAP_STEP = {"action": TaskAction.TAP, "params": {"x": 37, "y": 1399}}
+INTERVAL_UNITS = [
+    ("时", 60 * 60 * 1000),
+    ("分", 60 * 1000),
+    ("秒", 1000),
+    ("毫秒", 1),
+]
 
 
 class TaskEditDialog(QDialog):
@@ -54,6 +66,33 @@ class TaskEditDialog(QDialog):
         device_layout.addWidget(refresh_devices_btn)
         form.addRow("执行设备:", device_layout)
 
+        self.task_mode_combo = QComboBox()
+        self.task_mode_combo.addItem("普通步骤任务", "normal")
+        self.task_mode_combo.addItem("图像匹配触发任务", "image_match")
+        idx = self.task_mode_combo.findData(getattr(self.task, "task_mode", "normal"))
+        if idx >= 0:
+            self.task_mode_combo.setCurrentIndex(idx)
+        self.task_mode_combo.currentIndexChanged.connect(self.on_task_mode_changed)
+        form.addRow("任务模式:", self.task_mode_combo)
+
+        self.image_match_widget = QWidget()
+        image_match_layout = QHBoxLayout(self.image_match_widget)
+        image_match_layout.setContentsMargins(0, 0, 0, 0)
+        sample_path = (getattr(self.task, "match_config", {}) or {}).get("sample_path", "")
+        self.sample_status_label = QLabel(os.path.basename(sample_path) if sample_path else "未选择样本图")
+        image_match_layout.addWidget(self.sample_status_label, 1)
+        pick_sample_btn = QPushButton("重新截图框选")
+        pick_sample_btn.clicked.connect(self.pick_image_sample)
+        image_match_layout.addWidget(pick_sample_btn)
+        form.addRow("目标样本:", self.image_match_widget)
+
+        self.match_threshold = QDoubleSpinBox()
+        self.match_threshold.setRange(0.50, 0.99)
+        self.match_threshold.setSingleStep(0.01)
+        self.match_threshold.setDecimals(2)
+        self.match_threshold.setValue(float((getattr(self.task, "match_config", {}) or {}).get("threshold", 0.88)))
+        form.addRow("匹配阈值:", self.match_threshold)
+
         self.steps_list = QListWidget()
         self.steps_list.setMaximumHeight(150)
         form.addRow("操作步骤:", self.steps_list)
@@ -93,13 +132,16 @@ class TaskEditDialog(QDialog):
         form.addRow("调度类型:", self.schedule_combo)
 
         self.interval_widget = QWidget()
-        interval_layout = QVBoxLayout(self.interval_widget)
+        interval_layout = QHBoxLayout(self.interval_widget)
         interval_layout.setContentsMargins(0, 0, 0, 0)
         self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(1, 86400)
-        self.interval_spin.setValue(self.task.interval_seconds or 60)
-        self.interval_spin.setSuffix(" 秒")
+        self.interval_spin.setRange(1, 999999)
         interval_layout.addWidget(self.interval_spin)
+        self.interval_unit_combo = QComboBox()
+        for label, multiplier in INTERVAL_UNITS:
+            self.interval_unit_combo.addItem(label, multiplier)
+        interval_layout.addWidget(self.interval_unit_combo)
+        self._set_interval_inputs(getattr(self.task, "interval_milliseconds", self.task.interval_seconds * 1000))
         form.addRow("间隔时间:", self.interval_widget)
 
         self.time_widget = QWidget()
@@ -120,6 +162,7 @@ class TaskEditDialog(QDialog):
 
         layout.addLayout(form)
         self.on_schedule_changed()
+        self.on_task_mode_changed()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -137,6 +180,56 @@ class TaskEditDialog(QDialog):
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, i)
             self.steps_list.addItem(item)
+
+    def _default_tap_step(self):
+        return {"action": DEFAULT_TAP_STEP["action"], "params": dict(DEFAULT_TAP_STEP["params"])}
+
+    def _set_interval_inputs(self, milliseconds: int):
+        milliseconds = int(milliseconds or 60000)
+        for index, (_, multiplier) in enumerate(INTERVAL_UNITS):
+            if milliseconds >= multiplier and milliseconds % multiplier == 0:
+                self.interval_spin.setValue(milliseconds // multiplier)
+                self.interval_unit_combo.setCurrentIndex(index)
+                return
+        self.interval_spin.setValue(milliseconds)
+        self.interval_unit_combo.setCurrentIndex(self.interval_unit_combo.findData(1))
+
+    def _interval_milliseconds_from_inputs(self):
+        return self.interval_spin.value() * self.interval_unit_combo.currentData()
+
+    def on_task_mode_changed(self):
+        is_image_match = self.task_mode_combo.currentData() == "image_match"
+        self.image_match_widget.setVisible(is_image_match)
+        self.match_threshold.setVisible(is_image_match)
+
+    def pick_image_sample(self):
+        target_scope, target_serial = self.device_combo.currentData()
+        serial = target_serial
+        if target_scope == "all":
+            parent = self.parent()
+            serial = getattr(parent, "current_serial", None)
+        if not serial:
+            QMessageBox.warning(self, "提示", "请先选择一个在线设备。")
+            return
+
+        parent = self.parent()
+        adb_manager = getattr(parent, "adb_manager", None)
+        if not adb_manager:
+            return
+
+        dialog = ImageSamplePickerDialog(adb_manager, serial, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.task.match_config = {
+                "sample_path": dialog.sample_path,
+                "region": {
+                    "x": round(dialog.region.x()),
+                    "y": round(dialog.region.y()),
+                    "width": round(dialog.region.width()),
+                    "height": round(dialog.region.height()),
+                },
+                "threshold": self.match_threshold.value(),
+            }
+            self.sample_status_label.setText(os.path.basename(dialog.sample_path))
 
     def refresh_device_options(self):
         current_value = self.device_combo.currentData() if self.device_combo.count() else None
@@ -179,7 +272,7 @@ class TaskEditDialog(QDialog):
         return -1
 
     def add_step(self):
-        default = {"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}
+        default = self._default_tap_step()
         d = StepEditDialog(default, len(self.steps), self)
         if d.exec() == QDialog.DialogCode.Accepted:
             self.steps.append(default)
@@ -204,7 +297,7 @@ class TaskEditDialog(QDialog):
         if len(self.steps) > 1:
             self.steps.pop(idx)
         else:
-            self.steps = [{"action": TaskAction.TAP, "params": {"x": 540, "y": 960}}]
+            self.steps = [self._default_tap_step()]
         self.refresh_steps()
 
     def move_up(self):
@@ -244,11 +337,22 @@ class TaskEditDialog(QDialog):
         self.task.action = self.steps[0]["action"]
         self.task.params = self.steps[0]["params"]
         self.task.steps = [dict(s) for s in self.steps]
+        self.task.task_mode = self.task_mode_combo.currentData()
+        if self.task.task_mode == "image_match":
+            config = dict(getattr(self.task, "match_config", {}) or {})
+            if not config.get("sample_path"):
+                QMessageBox.warning(self, "警告", "请先框选目标样本图")
+                return
+            config["threshold"] = self.match_threshold.value()
+            self.task.match_config = config
+        else:
+            self.task.match_config = {}
         target_scope, target_serial = self.device_combo.currentData()
         self.task.target_scope = target_scope
         self.task.serial = target_serial
         self.task.schedule_type = self.schedule_combo.currentData()
-        self.task.interval_seconds = self.interval_spin.value()
+        self.task.interval_milliseconds = self._interval_milliseconds_from_inputs()
+        self.task.interval_seconds = max(1, round(self.task.interval_milliseconds / 1000))
 
         if self.task.schedule_type == "scheduled":
             t = self.time_edit.time()

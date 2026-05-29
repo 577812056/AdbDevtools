@@ -1,8 +1,9 @@
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os
+import tempfile
 
 
 action_names = {
@@ -13,6 +14,7 @@ action_names = {
     "screenshot": "截屏",
     "start_app": "启动应用",
     "stop_app": "停止应用",
+    "image_match": "图像匹配触发",
 }
 
 KEY_MAP = {
@@ -50,7 +52,9 @@ class ScheduledTask:
     def __init__(self, task_id: str, name: str, action: str, serial: str, 
                  params: Dict, schedule_type: str, schedule_time: Optional[str] = None,
                  interval_seconds: int = 0, enabled: bool = True,
-                 steps: Optional[List[Dict]] = None, target_scope: str = "single"):
+                 steps: Optional[List[Dict]] = None, target_scope: str = "single",
+                 task_mode: str = "normal", match_config: Optional[Dict] = None,
+                 interval_milliseconds: int = 0):
         self.task_id = task_id
         self.name = name
         self.action = action
@@ -58,9 +62,12 @@ class ScheduledTask:
         self.target_scope = target_scope
         self.params = params
         self.steps = steps if steps else [{"action": action, "params": params}]
+        self.task_mode = task_mode
+        self.match_config = match_config or {}
         self.schedule_type = schedule_type
         self.schedule_time = schedule_time
-        self.interval_seconds = interval_seconds
+        self.interval_milliseconds = max(1, interval_milliseconds or interval_seconds * 1000 or 60000)
+        self.interval_seconds = max(1, round(self.interval_milliseconds / 1000))
         self.enabled = enabled
         self.last_run = None
         self.run_count = 0
@@ -74,9 +81,12 @@ class ScheduledTask:
             "target_scope": self.target_scope,
             "params": self.params,
             "steps": self.steps,
+            "task_mode": self.task_mode,
+            "match_config": self.match_config,
             "schedule_type": self.schedule_type,
             "schedule_time": self.schedule_time,
             "interval_seconds": self.interval_seconds,
+            "interval_milliseconds": self.interval_milliseconds,
             "enabled": self.enabled,
             "last_run": self.last_run,
             "run_count": self.run_count,
@@ -95,9 +105,12 @@ class ScheduledTask:
             target_scope=data.get("target_scope", "all" if data.get("serial") == "__all__" else "single"),
             params=data["params"],
             steps=steps,
+            task_mode=data.get("task_mode", "normal"),
+            match_config=data.get("match_config", {}),
             schedule_type=data["schedule_type"],
             schedule_time=data.get("schedule_time"),
             interval_seconds=data.get("interval_seconds", 0),
+            interval_milliseconds=data.get("interval_milliseconds", 0),
             enabled=data.get("enabled", True),
         )
         task.last_run = data.get("last_run")
@@ -107,6 +120,7 @@ class ScheduledTask:
 
 class TaskManager(QObject):
     task_executed = pyqtSignal(str, str, bool, list, list)
+    task_log = pyqtSignal(str, str)
 
     def __init__(self, adb_manager, tasks_file: str = "tasks.json"):
         super().__init__()
@@ -119,6 +133,7 @@ class TaskManager(QObject):
         self.check_timer.timeout.connect(self._check_scheduled_tasks)
         self.check_timer.start(10000)
         self.load_tasks()
+        self.start_enabled_tasks()
 
     def load_tasks(self):
         if os.path.exists(self.tasks_file):
@@ -135,6 +150,15 @@ class TaskManager(QObject):
         data = [task.to_dict() for task in self.tasks.values()]
         with open(self.tasks_file, "w") as f:
             json.dump(data, f, indent=2)
+
+    def start_enabled_tasks(self):
+        for task in self.tasks.values():
+            if not task.enabled:
+                continue
+            if task.schedule_type == "interval":
+                self._start_interval_timer(task)
+            elif task.schedule_type == "scheduled":
+                self._schedule_task(task)
 
     def add_task(self, task: ScheduledTask):
         self.tasks[task.task_id] = task
@@ -227,6 +251,54 @@ class TaskManager(QObject):
             print(f"Step execution failed: {e}")
         return False
 
+    def _emit_task_log(self, task: ScheduledTask, message: str):
+        self.task_log.emit(task.name, message)
+
+    def _match_target_image(self, task: ScheduledTask, serial: str):
+        config = task.match_config or {}
+        sample_path = config.get("sample_path", "")
+        threshold = float(config.get("threshold", 0.88))
+        if not sample_path or not os.path.exists(sample_path):
+            return False, "样本图不存在", None
+
+        try:
+            import cv2
+        except Exception:
+            return False, "缺少 opencv-python，无法执行图像匹配", None
+
+        screenshot_path = os.path.join(
+            tempfile.gettempdir(), f"adb_match_{task.task_id}_{serial.replace(':', '_')}.png"
+        )
+        if not self.adb_manager.take_screenshot(serial, screenshot_path):
+            return False, "实时截图失败", None
+
+        source = cv2.imread(screenshot_path, cv2.IMREAD_GRAYSCALE)
+        template = cv2.imread(sample_path, cv2.IMREAD_GRAYSCALE)
+        if source is None or template is None:
+            return False, "截图或样本图读取失败", None
+        if template.shape[0] > source.shape[0] or template.shape[1] > source.shape[1]:
+            return False, "样本图尺寸大于当前截图", None
+
+        if float(template.std()) < 1.0:
+            result = cv2.matchTemplate(source, template, cv2.TM_SQDIFF_NORMED)
+            min_val, _, min_loc, _ = cv2.minMaxLoc(result)
+            max_val = 1.0 - min_val
+            max_loc = min_loc
+        else:
+            result = cv2.matchTemplate(source, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        matched = max_val >= threshold
+        location = {
+            "x": int(max_loc[0]),
+            "y": int(max_loc[1]),
+            "score": float(max_val),
+            "width": int(template.shape[1]),
+            "height": int(template.shape[0]),
+        }
+        if matched:
+            return True, f"匹配成功，相似度 {max_val:.3f}，位置 ({location['x']}, {location['y']})", location
+        return False, f"未匹配，相似度 {max_val:.3f}，阈值 {threshold:.2f}", location
+
     def _get_task_serials(self, task: ScheduledTask) -> List[str]:
         if task.target_scope == "all" or task.serial == "__all__":
             serials = []
@@ -251,7 +323,24 @@ class TaskManager(QObject):
 
         for serial in target_serials:
             serial_success = True
+            if task.task_mode == "image_match":
+                self._emit_task_log(task, f"{serial}: 开始实时截图并扫描样本图")
+                matched, detail, _ = self._match_target_image(task, serial)
+                self._emit_task_log(task, f"{serial}: {detail}")
+                if not matched:
+                    if detail.startswith("未匹配"):
+                        success_serials.append(serial)
+                    else:
+                        serial_success = False
+                        success = False
+                        failed_serials.append(serial)
+                    continue
+
             for step in task.steps:
+                self._emit_task_log(
+                    task,
+                    f"{serial}: 执行步骤 {action_names.get(step.get('action'), step.get('action'))}"
+                )
                 if not self._execute_step(serial, step):
                     serial_success = False
                     success = False
@@ -272,7 +361,7 @@ class TaskManager(QObject):
             self.timers[task.task_id].stop()
         timer = QTimer()
         timer.timeout.connect(lambda: self.execute_task(task.task_id))
-        timer.start(task.interval_seconds * 1000)
+        timer.start(max(1, task.interval_milliseconds))
         self.timers[task.task_id] = timer
 
     def _schedule_task(self, task: ScheduledTask):
@@ -284,7 +373,7 @@ class TaskManager(QObject):
             scheduled_time = datetime.fromisoformat(task.schedule_time)
             now = datetime.now()
             if scheduled_time <= now:
-                scheduled_time = scheduled_time.replace(day=scheduled_time.day + 1)
+                scheduled_time = scheduled_time + timedelta(days=1)
             delay_ms = int((scheduled_time - now).total_seconds() * 1000)
             timer = QTimer()
             timer.setSingleShot(True)

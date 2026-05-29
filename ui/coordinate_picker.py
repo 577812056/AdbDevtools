@@ -1,7 +1,7 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QComboBox, QGraphicsView, QGraphicsScene,
                              QGraphicsPixmapItem, QFormLayout, QSpinBox)
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import Qt, QRectF, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor
 from core.adb_manager import AdbManager
 import os
@@ -134,11 +134,11 @@ class CoordinatePickerDialog(QDialog):
         self.scene.addItem(item)
         self.view.setScene(self.scene)
         self.view.setSceneRect(QRectF(0, 0, self.device_w, self.device_h))
-        self.zoom_original()
+        QTimer.singleShot(0, self.fit_to_window)
 
         self.scale_x = self.view.viewport().width() / self.device_w
         self.scale_y = self.view.viewport().height() / self.device_h
-        self.coord_label.setText(f"已加载: {self.device_w}x{self.device_h}")
+        self.coord_label.setText(f"已加载: {self.device_w}x{self.device_h}，准备适应窗口")
 
     def apply_zoom(self):
         if not self.pixmap:

@@ -62,11 +62,11 @@ class StepEditDialog(QDialog):
         if action == TaskAction.TAP:
             x = QSpinBox()
             x.setRange(0, 9999)
-            x.setValue(params.get("x", 540))
+            x.setValue(params.get("x", 37))
             self.params_form.addRow("X坐标:", x)
             y = QSpinBox()
             y.setRange(0, 9999)
-            y.setValue(params.get("y", 960))
+            y.setValue(params.get("y", 1399))
             self.params_form.addRow("Y坐标:", y)
             self.params_widgets = {"x": x, "y": y}
 
@@ -87,7 +87,12 @@ class StepEditDialog(QDialog):
             y2.setRange(0, 9999)
             y2.setValue(params.get("y2", 500))
             self.params_form.addRow("结束Y:", y2)
-            self.params_widgets = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+            duration = QSpinBox()
+            duration.setRange(100, 5000)
+            duration.setValue(params.get("duration", 300))
+            duration.setSuffix(" ms")
+            self.params_form.addRow("持续时间:", duration)
+            self.params_widgets = {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration": duration}
 
         elif action == TaskAction.INPUT_TEXT:
             text = QLineEdit(params.get("text", ""))
@@ -142,6 +147,7 @@ class StepEditDialog(QDialog):
             return {
                 "x1": w["x1"].value(), "y1": w["y1"].value(),
                 "x2": w["x2"].value(), "y2": w["y2"].value(),
+                "duration": w["duration"].value(),
             }
         elif action == TaskAction.INPUT_TEXT:
             return {"text": w["text"].text()}

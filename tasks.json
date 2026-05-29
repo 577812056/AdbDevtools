@@ -18,37 +18,52 @@
         }
       }
     ],
+    "task_mode": "normal",
+    "match_config": {},
     "schedule_type": "scheduled",
     "schedule_time": "2026-05-27T04:10:00",
     "interval_seconds": 60,
+    "interval_milliseconds": 60000,
     "enabled": false,
     "last_run": null,
     "run_count": 0
   },
   {
-    "task_id": "20e658ef-e398-4946-a34e-6f1b034f8de1",
-    "name": "1",
+    "task_id": "c045f6ad-a06d-4bdf-8b88-ce4acff5ea66",
+    "name": "\u68c0\u6d4b\u662f\u5426\u6536\u82b1",
     "action": "tap",
     "serial": "emulator-5554",
     "target_scope": "single",
     "params": {
-      "x": 38,
-      "y": 1402
+      "x": 37,
+      "y": 1399
     },
     "steps": [
       {
         "action": "tap",
         "params": {
-          "x": 38,
-          "y": 1402
+          "x": 37,
+          "y": 1399
         }
       }
     ],
+    "task_mode": "image_match",
+    "match_config": {
+      "sample_path": "/Users/siwei/Demo/AdbDevtools/task_samples/sample_457fdf75836540638f157700431710ea.png",
+      "region": {
+        "x": 177,
+        "y": 157,
+        "width": 119,
+        "height": 728
+      },
+      "threshold": 0.88
+    },
     "schedule_type": "interval",
     "schedule_time": null,
-    "interval_seconds": 60,
-    "enabled": false,
-    "last_run": null,
-    "run_count": 0
+    "interval_seconds": 300,
+    "interval_milliseconds": 300000,
+    "enabled": true,
+    "last_run": "2026-05-29T18:14:30.347068",
+    "run_count": 50
   }
 ]
